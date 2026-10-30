@@ -1,0 +1,6 @@
+# The prebuilt exe in bin/ IS shipped on purpose: this app needs no SDK and no
+# installs, so a clone should be runnable straight away. Nothing else is build
+# output worth keeping.
+*.bak
+*.pdb
+obj/
