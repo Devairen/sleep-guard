@@ -7,6 +7,9 @@ namespace SleepGuard
 {
     internal static class Program
     {
+        /// True during --geotest/--statetest: they measure a visible card, so taskbar mode stays off.
+        internal static bool TestRun;
+
         [STAThread]
         public static int Main(string[] argv)
         {
@@ -14,7 +17,16 @@ namespace SleepGuard
                 return SelfTest();
 
             if (argv != null && argv.Length > 0 && argv[0] == "--geotest")
+            {
+                TestRun = true;
                 return GeometryTest();
+            }
+
+            if (argv != null && argv.Length > 0 && argv[0] == "--statetest")
+            {
+                TestRun = true;
+                return StateTest();
+            }
 
             // It starts with Windows, so a second copy must be impossible:
             // two processes would each hold their own wake lock.
@@ -68,6 +80,80 @@ namespace SleepGuard
 
             window.Show();
             return app.Run();
+        }
+
+        /// <summary>
+        /// Proves the pill, the timer row and the real state agree after the
+        /// timer ends, and that a deadline missed while the PC was asleep does
+        /// not fire the end action. The test sets the end to "then nothing",
+        /// so it can never hibernate the PC. Result: %TEMP%\sleepguard-statetest.txt.
+        /// </summary>
+        private static int StateTest()
+        {
+            // The card saves its settings when it resizes, which would store the
+            // test's "then nothing". Keep the real file and put it back at the end.
+            string iniPath = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SleepGuard", "settings.ini");
+            string iniBefore = System.IO.File.Exists(iniPath) ? System.IO.File.ReadAllText(iniPath) : null;
+
+            Application app = new Application();
+            app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            MainWindow w = new MainWindow();
+            System.Text.StringBuilder log = new System.Text.StringBuilder();
+            Func<string, string> line = delegate(string label)
+            {
+                string drawn = new[] { "Auto", "Awake", "Screen" }[w.DrawnIndex];
+                return label + ": state=" + w.Mode + " drawn=" + drawn +
+                    " timerRow=" + (w.ArmedRowOpen ? "open" : "closed") + " finish=" + w.LastFinish;
+            };
+
+            w.Loaded += delegate
+            {
+                Step(400, delegate
+                {
+                    w.SelectForTest(WakeMode.Awake);
+                    Step(700, delegate
+                    {
+                        log.AppendLine(line("1 armed Awake          "));
+                        w.DeadlineForTest(-1);
+                        w.TickForTest();
+                        Step(700, delegate
+                        {
+                            log.AppendLine(line("2 timer just ran out   "));
+                            w.SelectForTest(WakeMode.Awake);
+                            Step(700, delegate
+                            {
+                                w.DeadlineForTest(-600);
+                                w.TickForTest();
+                                Step(700, delegate
+                                {
+                                    log.AppendLine(line("3 ran out while asleep "));
+                                    w.SelectForTest(WakeMode.Screen);
+                                    Step(700, delegate
+                                    {
+                                        w.SelectForTest(WakeMode.Auto);
+                                        Step(700, delegate
+                                        {
+                                            log.AppendLine(line("4 Screen then Auto     "));
+                                            System.IO.File.WriteAllText(
+                                                System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                                    "sleepguard-statetest.txt"), log.ToString());
+                                            Native.Apply(WakeMode.Auto);
+                                            app.Shutdown();
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    });
+                });
+            };
+
+            w.Show();
+            int rc = app.Run();
+            // After Run: closing the window saves the settings one last time.
+            if (iniBefore != null) System.IO.File.WriteAllText(iniPath, iniBefore);
+            return rc;
         }
 
         /// Run an action after a delay without blocking the dispatcher, so

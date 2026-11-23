@@ -36,6 +36,9 @@ namespace SleepGuard
 
         public WakeMode Mode { get { return _mode; } }
 
+        /// <summary>For the state test: which segment the thumb is drawn on.</summary>
+        internal int DrawnIndex { get { return (int)Math.Round(_slide.X / SegWidth); } }
+
         public StatePill()
         {
             Width = PillWidth;
@@ -162,6 +165,17 @@ namespace SleepGuard
 
             if (!animate)
             {
+                // Drop any earlier animation first. A finished WPF animation
+                // keeps holding its last value over a plain assignment, so
+                // without this the thumb stayed drawn on Awake after the timer
+                // had switched back to Auto, and a click on Auto did nothing
+                // because the control already thought it was there (19/11/2026).
+                _slide.BeginAnimation(TranslateTransform.XProperty, null);
+                _thumbFill.BeginAnimation(SolidColorBrush.ColorProperty, null);
+                _glow.BeginAnimation(DropShadowEffect.OpacityProperty, null);
+                for (int i = 0; i < 3; i++)
+                    _segmentInk[i].BeginAnimation(SolidColorBrush.ColorProperty, null);
+
                 _slide.X = x;
                 _thumbFill.Color = fill;
                 _glow.Opacity = glow;

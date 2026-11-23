@@ -33,6 +33,12 @@ warns two minutes before with a tray balloon (clicking it adds 30 minutes), then
 drops the hold and hibernates. This is the "don't stay awake all night because a
 game is open" guard.
 
+When the timer ends, the card switches back to Auto and shows it for a second
+and a half before the PC goes down, so it wakes up showing the right state. If
+the PC was already asleep or hibernated when the deadline passed (more than 90
+seconds late), the card only goes back to Auto: it does not hibernate the PC
+again the moment you wake it. On every wake it settles the clock and redraws.
+
 ## Why it cannot leave the PC stuck awake
 
 The hold is a `SetThreadExecutionState` call, which lives only as long as this
@@ -43,11 +49,28 @@ silently pinned awake.
 
 ## Using it
 
-- Click a pill position to switch. Drag the card anywhere; it remembers.
+- **Taskbar mode (default since 23/11/2026).** A chip inside the taskbar, next
+  to the tray icons, shows the mode with the same icons as the pill (moon =
+  Auto, bolt = Awake, monitor = Screen), a ring that empties as the time limit
+  runs out, and the time left as h:mm. Click it and the card springs up above
+  the taskbar; click anywhere else and it closes. Right-click gives the tray
+  menu, where "Show in the taskbar" switches back to the desktop card below
+  (live, no restart). The chip never takes focus, re-pins itself above the
+  taskbar, and hides under full-screen apps. The card grows upwards when the
+  timer row opens. Code: `src/TaskbarChip.cs` and the flyout part of
+  `src/MainWindow.cs`. The Today card's chip finds this one by its window title
+  "Sleep Guard chip" and sits to its left. The self-tests force the desktop card.
+- Click a pill position to switch. Drag the card anywhere; it remembers (desktop mode).
 - The `✕` hides it to the tray. Only the tray menu quits.
 - Tray icon: a ring that empties as the time runs out, so you can read the state
   without the card on screen.
-- Tray menu: show/hide, keep above other windows, start with Windows, quit.
+- It behaves like a desktop widget: other windows go over it, and Show desktop
+  (Win+D, or the corner of the taskbar) reveals it instead of hiding it. The
+  next window you pick goes back over it. A click on the tray icon brings it to
+  the front without taking focus. Logic and the Windows quirks it works around:
+  `src/DesktopLayer.cs`.
+- Tray menu: show/hide, keep above other windows (pins it on top for good),
+  start with Windows, quit.
 - Starts with Windows via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
   value `SleepGuard`.
 - Settings live in `%APPDATA%\SleepGuard\settings.ini`.
@@ -98,3 +121,16 @@ values must be identical: the top edge is the anchor, so the timer row grows
 downwards instead of shifting the card under the cursor. The one exception is a
 card parked so low that the taller version would fall off the bottom of that
 monitor, which pulls it up by the minimum needed.
+
+```powershell
+.\bin\SleepGuard.exe --statetest
+```
+
+Writes `%TEMP%\sleepguard-statetest.txt`: four lines comparing the real state,
+the position the slider is drawn at, and whether the timer row is open. It arms
+Awake, lets the timer run out, lets it run out "while asleep", and goes Screen
+then Auto. Every line after the first must read `state=Auto drawn=Auto
+timerRow=closed`. The test ends with "then nothing", so it never powers the PC
+down, and it puts `settings.ini` back exactly as it found it. Before the fix of
+19/11/2026 line 2 read `state=Auto drawn=Awake`: a finished WPF animation kept
+the slider on Awake, and a click on Auto was ignored.

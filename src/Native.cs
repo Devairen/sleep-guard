@@ -131,26 +131,33 @@ namespace SleepGuard
             finally { if (token != IntPtr.Zero) CloseHandle(token); }
         }
 
-        /// <summary>Drop the wake lock, then hibernate. Falls back to shutdown.exe.</summary>
-        public static void Hibernate()
+        /// <summary>
+        /// Drop the wake lock, then hibernate. Falls back to shutdown.exe.
+        /// Returns false if neither route got the machine down, so the caller
+        /// can say so instead of leaving the PC awake in silence.
+        /// </summary>
+        public static bool Hibernate()
         {
             Apply(WakeMode.Auto);
             EnableShutdownPrivilege();
-            try { if (SetSuspendState(true, true, false)) return; }
+            try { if (SetSuspendState(true, true, false)) return true; }
             catch { }
-            RunHidden("shutdown.exe", "/h");
+            return RunHidden("shutdown.exe", "/h");
         }
 
-        /// <summary>Drop the wake lock, then sleep.</summary>
-        public static void Sleep()
+        /// <summary>
+        /// Drop the wake lock, then sleep. Returns false if Windows refused;
+        /// there is no second route to sleep, so the caller reports it.
+        /// </summary>
+        public static bool Sleep()
         {
             Apply(WakeMode.Auto);
             EnableShutdownPrivilege();
-            try { SetSuspendState(false, true, false); }
-            catch { }
+            try { return SetSuspendState(false, true, false); }
+            catch { return false; }
         }
 
-        private static void RunHidden(string exe, string args)
+        private static bool RunHidden(string exe, string args)
         {
             try
             {
@@ -158,8 +165,9 @@ namespace SleepGuard
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
                 Process.Start(psi);
+                return true;
             }
-            catch { }
+            catch { return false; }
         }
 
         // ---- Reading the real power plan -------------------------------

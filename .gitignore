@@ -2,5 +2,7 @@
 # installs, so a clone should be runnable straight away. Nothing else is build
 # output worth keeping.
 *.bak
+# Local restore points of the exe, kept beside it before each rebuild.
+bin/*.pre-*
 *.pdb
 obj/

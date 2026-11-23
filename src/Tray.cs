@@ -27,9 +27,13 @@ namespace SleepGuard
         private IntPtr _lastHandle = IntPtr.Zero;
 
         public event Action ShowRequested;
+        /// A left click on the icon itself (the menu's Show/Hide item stays ShowRequested).
+        public event Action IconClicked;
         public event Action QuitRequested;
         public event Action<bool> TopmostToggled;
+        public event Action<bool> TaskbarToggled;
         public event Action ExtendRequested;
+        private readonly ToolStripMenuItem _taskbarItem;
 
         public Tray()
         {
@@ -41,6 +45,13 @@ namespace SleepGuard
             _topmostItem.Click += delegate
             {
                 if (TopmostToggled != null) TopmostToggled(_topmostItem.Checked);
+            };
+
+            _taskbarItem = new ToolStripMenuItem("Show in the taskbar");
+            _taskbarItem.CheckOnClick = true;
+            _taskbarItem.Click += delegate
+            {
+                if (TaskbarToggled != null) TaskbarToggled(_taskbarItem.Checked);
             };
 
             _startupItem = new ToolStripMenuItem("Start with Windows");
@@ -59,7 +70,11 @@ namespace SleepGuard
             menu.BackColor = Color.FromArgb(20, 20, 21);
             menu.ForeColor = Color.FromArgb(244, 244, 245);
             menu.ShowImageMargin = false;
+            // Without this the ticks on "Show in the taskbar" and "Start with
+            // Windows" were never drawn (found 23/11/2026).
+            menu.ShowCheckMargin = true;
             menu.Items.Add(_showItem);
+            menu.Items.Add(_taskbarItem);
             menu.Items.Add(_topmostItem);
             menu.Items.Add(_startupItem);
             menu.Items.Add(new ToolStripSeparator());
@@ -71,7 +86,7 @@ namespace SleepGuard
             _icon.Visible = true;
             _icon.MouseClick += delegate(object s, MouseEventArgs e)
             {
-                if (e.Button == MouseButtons.Left && ShowRequested != null) ShowRequested();
+                if (e.Button == MouseButtons.Left && IconClicked != null) IconClicked();
             };
             _icon.BalloonTipClicked += delegate
             {
@@ -84,6 +99,21 @@ namespace SleepGuard
         public void SetTopmostChecked(bool on)
         {
             _topmostItem.Checked = on;
+        }
+
+        /// <summary>Taskbar mode hides the items that only make sense for the desktop card.</summary>
+        public void SetTaskbarChecked(bool on)
+        {
+            _taskbarItem.Checked = on;
+            _topmostItem.Visible = !on;
+            _showItem.Visible = !on;
+        }
+
+        /// <summary>The same menu, opened from a right-click on the taskbar chip.</summary>
+        public void ShowMenuAtCursor()
+        {
+            try { _icon.ContextMenuStrip.Show(Cursor.Position); }
+            catch { }
         }
 
         public void SetShowLabel(bool windowVisible)

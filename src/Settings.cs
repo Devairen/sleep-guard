@@ -18,7 +18,12 @@ namespace SleepGuard
 
         public int DurationSeconds = 2 * 3600;   // 0 means no limit
         public EndAction End = EndAction.Hibernate;
-        public bool Topmost = true;   // a widget you cannot see is useless; the tray menu turns it off
+        // Off since 18/11/2026: a desktop widget sits under other windows and
+        // Win+D reveals it (DesktopLayer.cs). The tray menu can still pin it.
+        public bool Topmost = false;
+        // On since 23/11/2026 (one monitor): a chip in the taskbar opens the
+        // card above it (TaskbarChip.cs). Off = the desktop widget above.
+        public bool Taskbar = true;
         public double Left = double.NaN;
         public double Top = double.NaN;
 
@@ -50,6 +55,7 @@ namespace SleepGuard
                     if (key == "duration") s.DurationSeconds = ParseInt(val, s.DurationSeconds);
                     else if (key == "end") s.End = ParseEnd(val);
                     else if (key == "topmost") s.Topmost = (val == "1" || val == "true");
+                    else if (key == "taskbar") s.Taskbar = (val == "1" || val == "true");
                     else if (key == "left") s.Left = ParseDouble(val);
                     else if (key == "top") s.Top = ParseDouble(val);
                 }
@@ -66,11 +72,19 @@ namespace SleepGuard
                 lines.Add("duration=" + DurationSeconds.ToString(CultureInfo.InvariantCulture));
                 lines.Add("end=" + End.ToString().ToLowerInvariant());
                 lines.Add("topmost=" + (Topmost ? "1" : "0"));
+                lines.Add("taskbar=" + (Taskbar ? "1" : "0"));
                 if (!double.IsNaN(Left))
                     lines.Add("left=" + Left.ToString("F0", CultureInfo.InvariantCulture));
                 if (!double.IsNaN(Top))
                     lines.Add("top=" + Top.ToString("F0", CultureInfo.InvariantCulture));
-                File.WriteAllLines(Path, lines.ToArray());
+                // Write beside the real file and swap it in. WriteAllLines
+                // truncates first, so a crash in that window would leave an
+                // empty settings.ini and lose the card's position.
+                string path = Path;
+                string tmp = path + ".tmp";
+                File.WriteAllLines(tmp, lines.ToArray());
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
             }
             catch { }
         }

@@ -25,6 +25,7 @@ namespace SleepGuard
 
         private readonly Settings _settings;
         private readonly Tray _tray;
+        private readonly DesktopLayer _layer;
         private readonly StatePill _pill;
         private readonly DispatcherTimer _timer;
 
@@ -47,6 +48,19 @@ namespace SleepGuard
 
         private readonly string _autoCaption;
 
+        // ---- taskbar mode (23/11/2026) ---------------------------------------
+        // The card becomes a flyout: a chip in the taskbar (TaskbarChip.cs)
+        // springs it up above the taskbar, a click anywhere else closes it.
+        private readonly Border _card;
+        private readonly TranslateTransform _lift = new TranslateTransform();
+        private readonly TaskbarChip _chip;
+        private bool _flyOpen;
+        private double _flyBottom;
+        private DateTime _lastHide = DateTime.MinValue;
+
+        /// Off during the self-tests: they need a visible card to measure.
+        private bool TaskbarOn { get { return _settings.Taskbar && !Program.TestRun; } }
+
         public MainWindow()
         {
             _settings = Settings.Load();
@@ -56,10 +70,14 @@ namespace SleepGuard
             AllowsTransparency = true;
             Background = Brushes.Transparent;
             ResizeMode = ResizeMode.NoResize;
-            ShowInTaskbar = false;
+            // Kept out of the taskbar by DesktopLayer (a tool window), not by
+            // ShowInTaskbar = false: that makes WPF hang the card under a hidden
+            // owner window, and Windows then ignored the Win+D pin (18/11/2026).
+            ShowInTaskbar = true;
             SizeToContent = SizeToContent.Height;
             Width = CardWidth + 2 * ShadowRoom;
-            Topmost = _settings.Topmost;
+            Topmost = _settings.Topmost || TaskbarOn;
+            ShowActivated = !TaskbarOn;
             Title = "Sleep Guard";
             UseLayoutRounding = true;
             TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
@@ -81,9 +99,15 @@ namespace SleepGuard
             card.BorderThickness = new Thickness(1);
             card.Effect = shadow;
             card.MouseLeftButtonDown += OnCardPressed;
+            card.RenderTransform = _lift;
+            if (TaskbarOn) card.Opacity = 0;   // invisible until the chip opens it
+            _card = card;
 
             StackPanel content = new StackPanel();
-            content.Margin = new Thickness(16, 13, 16, 13);
+            // 15, not 16: the 1 px border leaves 270 inside, and 16+240+16 was
+            // 2 px too wide, so WPF clipped the right edge ("then hibernat",
+            // the pill's end). Found 23/11/2026.
+            content.Margin = new Thickness(15, 13, 15, 13);
             content.Width = ContentWidth;
             card.Child = content;
 
@@ -132,10 +156,23 @@ namespace SleepGuard
             // ---- tray ----------------------------------------------------
             _tray = new Tray();
             _tray.ShowRequested += ToggleVisible;
+            _tray.IconClicked += OnTrayClick;
+            // A desktop widget: other windows cover it, Win+D reveals it.
+            // The flyout manages its own z-order, so the layer leaves it alone.
+            _layer = new DesktopLayer(this, delegate { return _settings.Topmost || TaskbarOn; });
+            SourceInitialized += delegate { _layer.Start(); };
+            Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerModeChanged;
             _tray.QuitRequested += Quit;
             _tray.TopmostToggled += OnTopmostToggled;
+            _tray.TaskbarToggled += SetTaskbarMode;
             _tray.ExtendRequested += Extend30;
             _tray.SetTopmostChecked(_settings.Topmost);
+            _tray.SetTaskbarChecked(TaskbarOn);
+
+            _chip = new TaskbarChip();
+            _chip.Clicked += ToggleFlyout;
+            _chip.RightClicked += delegate { _tray.ShowMenuAtCursor(); };
+            Deactivated += delegate { if (TaskbarOn && _flyOpen) HideFlyout(); };
 
             // ---- timer ---------------------------------------------------
             _timer = new DispatcherTimer();
@@ -163,6 +200,14 @@ namespace SleepGuard
                     if (Top < area.Top) Top = area.Top;
                 }
                 SizeChanged += OnWindowSizeChanged;
+
+                // Taskbar mode: the first Show only gave the card its layout;
+                // it waits hidden for a click on the chip.
+                if (TaskbarOn)
+                {
+                    Hide();
+                    _chip.Start();
+                }
             };
 
             Closing += delegate(object s, System.ComponentModel.CancelEventArgs e)
@@ -333,6 +378,7 @@ namespace SleepGuard
         private void OnCardPressed(object sender, MouseButtonEventArgs e)
         {
             if (e.ButtonState != MouseButtonState.Pressed) return;
+            if (TaskbarOn) return;   // the flyout sits where the chip puts it
             try { DragMove(); }
             catch { }
             SavePosition();
@@ -478,7 +524,12 @@ namespace SleepGuard
 
             if (left <= 0)
             {
-                Finish();
+                // This runs every second, so being more than 90 s late means
+                // the PC was asleep or hibernated when the deadline passed.
+                // The machine already went down: just go back to Auto. Running
+                // the end action now would hibernate it again the moment he
+                // woke it up.
+                Finish(left > -LateGraceSeconds);
                 return;
             }
 
@@ -498,11 +549,19 @@ namespace SleepGuard
             RefreshTray();
         }
 
-        private void Finish()
+        private const double LateGraceSeconds = 90;
+
+        /// <summary>What the last Finish decided; read by the state test.</summary>
+        internal string LastFinish = "none";
+
+        /// <param name="runEndAction">False when the deadline passed while the
+        /// PC was already down: back to Auto, nothing else.</param>
+        private void Finish(bool runEndAction)
         {
             _hasDeadline = false;
             _timer.Stop();
-            EndAction action = _settings.End;
+            EndAction action = runEndAction ? _settings.End : EndAction.Release;
+            LastFinish = runEndAction ? "end action " + action : "missed while asleep: back to Auto only";
 
             _pill.SetSilently(WakeMode.Auto);
             _caption.Text = _autoCaption;
@@ -510,9 +569,68 @@ namespace SleepGuard
             Native.Apply(WakeMode.Auto);
             RefreshTray();
 
-            if (action == EndAction.Hibernate) Native.Hibernate();
-            else if (action == EndAction.Sleep) Native.Sleep();
+            if (action == EndAction.Release) return;
+
+            // Let the card draw Auto before the PC goes down. Hibernating in the
+            // same breath froze the old picture, so after waking it still showed
+            // Awake (19/11/2026).
+            System.Windows.Threading.DispatcherTimer later = new System.Windows.Threading.DispatcherTimer();
+            later.Interval = TimeSpan.FromMilliseconds(1500);
+            later.Tick += delegate
+            {
+                later.Stop();
+                // He may have re-armed it in that second and a half.
+                if (_pill.Mode != WakeMode.Auto) return;
+
+                // The widget's one job is that the PC goes down when the timer
+                // ends. If Windows refuses, say so: otherwise the machine sits
+                // awake all night and nothing on screen admits it.
+                bool wentDown = action == EndAction.Hibernate ? Native.Hibernate() : Native.Sleep();
+                if (!wentDown)
+                {
+                    string what = (action == EndAction.Hibernate) ? "hibernate" : "sleep";
+                    _tray.Warn("Sleep Guard",
+                        "The timer ended but Windows refused to " + what +
+                        ". The PC is still awake.");
+                }
+            };
+            later.Start();
         }
+
+        /// <summary>
+        /// Back from sleep or hibernation: settle the clock at once (it may have
+        /// run out while the PC was down), re-state the wake hold, and redraw.
+        /// A see-through WPF window can come back showing its old picture.
+        /// </summary>
+        private void OnPowerModeChanged(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
+        {
+            if (e.Mode != Microsoft.Win32.PowerModes.Resume) return;
+            Dispatcher.BeginInvoke(new Action(delegate
+            {
+                Native.Apply(_pill.Mode);
+                if (_pill.Mode != WakeMode.Auto && !_timer.IsEnabled) _timer.Start();
+                Tick();
+                InvalidateVisual();
+                UpdateLayout();
+            }));
+        }
+
+        // ---- state test hooks (--statetest) ------------------------------
+
+        internal int DrawnIndex { get { return _pill.DrawnIndex; } }
+        internal WakeMode Mode { get { return _pill.Mode; } }
+        internal bool ArmedRowOpen { get { return _armedPanel.ActualHeight > 1; } }
+
+        /// <summary>Move the deadline; ends with "then nothing" so a test never powers down.</summary>
+        internal void DeadlineForTest(double secondsFromNow)
+        {
+            _settings.End = EndAction.Release;
+            _deadline = DateTime.UtcNow.AddSeconds(secondsFromNow);
+            _hasDeadline = true;
+        }
+
+        internal void TickForTest() { Tick(); }
+        internal void SelectForTest(WakeMode mode) { _pill.Select(mode); }
 
         private static string FormatRemaining(double seconds)
         {
@@ -584,6 +702,126 @@ namespace SleepGuard
             _tray.Draw(mode, fraction, limited);
             _tray.SetTooltip(tip);
             _tray.SetShowLabel(IsVisible);
+
+            if (_chip != null)
+            {
+                double secondsLeft = limited ? Math.Max(0, (_deadline - DateTime.UtcNow).TotalSeconds) : 0;
+                _chip.Update(mode, fraction, limited, secondsLeft);
+                _chip.ToolTip = tip.Replace("Sleep Guard - ", "Sleep Guard: ");
+            }
+        }
+
+        // ---- taskbar flyout ----------------------------------------------
+
+        private void ToggleFlyout()
+        {
+            if (_flyOpen) { HideFlyout(); return; }
+            // A click elsewhere (the tray icon, say) closes the card through
+            // Deactivated a moment before this runs: that click meant "close".
+            if ((DateTime.UtcNow - _lastHide).TotalMilliseconds < 300) return;
+            OpenFlyout();
+        }
+
+        /// <summary>
+        /// Spring the card up out of the taskbar: right edge on the chip's right
+        /// edge, bottom 12 px above the taskbar. It rises 28 px, overshoots a
+        /// touch and settles, fading in over the first 220 ms. Same motion as
+        /// the Today card (todo-app/desktop-card/taskbar.js).
+        /// </summary>
+        private void OpenFlyout()
+        {
+            _flyOpen = true;
+            Rect area = SystemParameters.WorkArea;
+            double w = CardWidth + 2 * ShadowRoom;
+            double cardRight = (_chip.Running && _chip.IsVisible) ? _chip.Bounds.Right : area.Right - 12;
+            if (cardRight > area.Right - 12) cardRight = area.Right - 12;
+            double left = cardRight + ShadowRoom - w;
+            if (left < area.Left) left = area.Left;
+            Left = left;
+            _flyBottom = area.Bottom - 12 + ShadowRoom;
+            if (ActualHeight > 0) Top = _flyBottom - ActualHeight;
+
+            Topmost = true;
+            _card.BeginAnimation(OpacityProperty, null);
+            _card.Opacity = 0;
+            Show();
+            Top = _flyBottom - ActualHeight;
+            // He clicked the chip, so taking focus is his own action, and it is
+            // what lets a click elsewhere close the card again.
+            Activate();
+            _tray.SetShowLabel(true);
+
+            _lift.BeginAnimation(TranslateTransform.YProperty, SpringFrames(28, 0, 520));
+            DoubleAnimation fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220));
+            CubicEase ease = new CubicEase();
+            ease.EasingMode = EasingMode.EaseOut;
+            fade.EasingFunction = ease;
+            _card.BeginAnimation(OpacityProperty, fade);
+        }
+
+        /// <summary>The reverse, quicker: sink 10 px and fade, then hide.</summary>
+        private void HideFlyout()
+        {
+            if (!_flyOpen) return;
+            _flyOpen = false;
+            _lastHide = DateTime.UtcNow;
+
+            DoubleAnimation drop = new DoubleAnimation(0, 10, TimeSpan.FromMilliseconds(140));
+            CubicEase ease = new CubicEase();
+            ease.EasingMode = EasingMode.EaseIn;
+            drop.EasingFunction = ease;
+            DoubleAnimation fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(140));
+            fade.Completed += delegate { if (!_flyOpen) Hide(); };
+            _lift.BeginAnimation(TranslateTransform.YProperty, drop);
+            _card.BeginAnimation(OpacityProperty, fade);
+            _tray.SetShowLabel(false);
+        }
+
+        /// <summary>
+        /// A damped spring as key frames: about 7% overshoot, settled in ~0.45 s.
+        /// WPF's BackEase front-loads the motion so much it reads as a pop.
+        /// </summary>
+        private static DoubleAnimationUsingKeyFrames SpringFrames(double from, double to, int ms)
+        {
+            const double zeta = 0.65, omega = 14;
+            double wd = omega * Math.Sqrt(1 - zeta * zeta);
+            DoubleAnimationUsingKeyFrames a = new DoubleAnimationUsingKeyFrames();
+            for (int t = 0; t <= ms; t += 16)
+            {
+                double s = t / 1000.0;
+                double p = 1 - Math.Exp(-zeta * omega * s) * (Math.Cos(wd * s) + (zeta * omega / wd) * Math.Sin(wd * s));
+                a.KeyFrames.Add(new LinearDoubleKeyFrame(from + (to - from) * p, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(t))));
+            }
+            a.KeyFrames.Add(new LinearDoubleKeyFrame(to, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(ms))));
+            return a;
+        }
+
+        /// <summary>The tray menu's "Show in the taskbar": switch live, no restart.</summary>
+        private void SetTaskbarMode(bool on)
+        {
+            _settings.Taskbar = on;
+            _settings.Save();
+            _tray.SetTaskbarChecked(on);
+            _lift.BeginAnimation(TranslateTransform.YProperty, null);
+            _card.BeginAnimation(OpacityProperty, null);
+            _lift.Y = 0;
+            _flyOpen = false;
+            if (on)
+            {
+                Hide();
+                _card.Opacity = 0;
+                Topmost = true;
+                _chip.Start();
+            }
+            else
+            {
+                _chip.Stop();
+                _card.Opacity = 1;
+                Topmost = _settings.Topmost;
+                Place();
+                ShowWidget();
+            }
+            RefreshTray();
         }
 
         // ---- window plumbing ---------------------------------------------
@@ -622,6 +860,13 @@ namespace SleepGuard
         /// </summary>
         private void OnWindowSizeChanged(object sender, SizeChangedEventArgs e)
         {
+            // The flyout is anchored at the bottom instead: the timer row grows
+            // it upwards, away from the taskbar.
+            if (TaskbarOn)
+            {
+                if (_flyOpen) Top = _flyBottom - ActualHeight;
+                return;
+            }
             Rect area = CurrentWorkArea();
             if (Top + ActualHeight <= area.Bottom) return;
 
@@ -648,8 +893,23 @@ namespace SleepGuard
             catch { return SystemParameters.WorkArea; }
         }
 
+        /// <summary>
+        /// A left click on the tray icon. The card is a normal window by default,
+        /// so a covered card comes to the front (unfocused) instead of hiding;
+        /// only a card pinned above other windows hides on a click.
+        /// </summary>
+        private void OnTrayClick()
+        {
+            if (TaskbarOn) { ToggleFlyout(); return; }
+            if (!IsVisible) { ShowWidget(); return; }
+            if (_settings.Topmost) { HideWidget(); return; }
+            Topmost = true;    // the WPF way to raise a window without activating it
+            Topmost = false;
+        }
+
         private void ToggleVisible()
         {
+            if (TaskbarOn) { ToggleFlyout(); return; }
             if (IsVisible) HideWidget();
             else ShowWidget();
         }
@@ -668,6 +928,8 @@ namespace SleepGuard
         /// </summary>
         private void SavePosition()
         {
+            // The flyout's spot is the chip's, not his: keep the desktop card's.
+            if (TaskbarOn) return;
             _settings.Left = Left;
             _settings.Top = Top;
             _settings.Save();
@@ -675,6 +937,7 @@ namespace SleepGuard
 
         private void HideWidget()
         {
+            if (TaskbarOn) { HideFlyout(); return; }
             SavePosition();
             Hide();
             _tray.SetShowLabel(false);
@@ -687,6 +950,9 @@ namespace SleepGuard
             Native.Apply(WakeMode.Auto);     // give the normal timeouts back
             SavePosition();
             _tray.Dispose();
+            _layer.Dispose();
+            _chip.Stop();
+            Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             Application.Current.Shutdown();
         }
 
